@@ -1,0 +1,414 @@
+
+# --- Imports ---
+import pandas as pd
+import numpy as np
+from rdkit import Chem
+from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LinearRegression, RidgeCV, LassoCV
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, StackingRegressor
+from sklearn.model_selection import KFold, cross_validate, GridSearchCV
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from xgboost import XGBRegressor
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+
+# Improve plot aesthetics
+sns.set_style('whitegrid')
+
+# Create directory for saving images (if it does not exist)
+save_dir = "images"
+os.makedirs(save_dir, exist_ok=True)
+
+# ================================
+# 1. Load training data and compute molecular descriptors
+# ================================
+
+# Read the training CSV: first column = SMILES, column "X" = target property
+a = pd.read_csv(r'C:\Users\Liana\Downloads\Telegram Desktop\Problem-4-train.csv')
+
+# Extract the SMILES column (assumed to be the first column)
+smiles_train = a.iloc[:, 0]
+
+# Initialize lists to store computed descriptors
+mw_list, tpsa_list, logp_list = [], [], []
+hetero_list, heavy_list, rings_list = [], [], []
+aromatic_list, hdonor_list, hacceptor_list = [], [], []
+rotatable_list, stereo_list, interaction_list = [], [], []
+
+# Loop over each SMILES, compute descriptors, and store
+for smi in smiles_train:
+    mol = Chem.MolFromSmiles(smi)
+    mw = Descriptors.MolWt(mol)
+    tpsa = rdMolDescriptors.CalcTPSA(mol)
+    logp = Crippen.MolLogP(mol)
+    hetero = rdMolDescriptors.CalcNumHeteroatoms(mol)
+    heavy = rdMolDescriptors.CalcNumHeavyAtoms(mol)
+    rings = rdMolDescriptors.CalcNumRings(mol)
+    aromatic = rdMolDescriptors.CalcNumAromaticRings(mol)
+    hdonor = Descriptors.NumHDonors(mol)
+    hacceptor = Descriptors.NumHAcceptors(mol)
+    rotatable = Descriptors.NumRotatableBonds(mol)
+    stereo = rdMolDescriptors.CalcNumAtomStereoCenters(mol)
+    interaction = mw * logp
+
+    mw_list.append(mw)
+    tpsa_list.append(tpsa)
+    logp_list.append(logp)
+    hetero_list.append(hetero)
+    heavy_list.append(heavy)
+    rings_list.append(rings)
+    aromatic_list.append(aromatic)
+    hdonor_list.append(hdonor)
+    hacceptor_list.append(hacceptor)
+    rotatable_list.append(rotatable)
+    stereo_list.append(stereo)
+    interaction_list.append(interaction)
+
+# Add new descriptor columns to the training DataFrame
+a["MolWeight"] = mw_list
+a["Tpsa"] = tpsa_list
+a["LogP"] = logp_list
+a["HeteroAtoms"] = hetero_list
+a["HeavyAtoms"] = heavy_list
+a["NumRings"] = rings_list
+a["NumAromaticRings"] = aromatic_list
+a["NumHDonors"] = hdonor_list
+a["NumHAcceptors"] = hacceptor_list
+a["NumRotatableBonds"] = rotatable_list
+a["StereoCenters"] = stereo_list
+a["Interaction"] = interaction_list  # MW × LogP
+
+# ================================
+# 2. Load test data and compute the same descriptors
+# ================================
+
+b = pd.read_csv(r'C:\Users\Liana\Downloads\Telegram Desktop\Problem-4-test.csv')
+smiles_test = b.iloc[:, 0]
+
+ss_mw, ss_tpsa, ss_logp = [], [], []
+ss_hetero, ss_heavy, ss_rings = [], [], []
+ss_aromatic, ss_hdonor, ss_hacceptor = [], [], []
+ss_rotatable, ss_stereo, ss_interaction = [], [], []
+
+for smi in smiles_test:
+    moll = Chem.MolFromSmiles(smi)
+    mw1 = Descriptors.MolWt(moll)
+    tpsa1 = rdMolDescriptors.CalcTPSA(moll)
+    logp1 = Crippen.MolLogP(moll)
+    hetero1 = rdMolDescriptors.CalcNumHeteroatoms(moll)
+    heavy1 = rdMolDescriptors.CalcNumHeavyAtoms(moll)
+    rings1 = rdMolDescriptors.CalcNumRings(moll)
+    aromatic1 = rdMolDescriptors.CalcNumAromaticRings(moll)
+    hdonor1 = Descriptors.NumHDonors(moll)
+    hacceptor1 = Descriptors.NumHAcceptors(moll)
+    rotatable1 = Descriptors.NumRotatableBonds(moll)
+    stereo1 = rdMolDescriptors.CalcNumAtomStereoCenters(moll)
+    interaction1 = mw1 * logp1
+
+    ss_mw.append(mw1)
+    ss_tpsa.append(tpsa1)
+    ss_logp.append(logp1)
+    ss_hetero.append(hetero1)
+    ss_heavy.append(heavy1)
+    ss_rings.append(rings1)
+    ss_aromatic.append(aromatic1)
+    ss_hdonor.append(hdonor1)
+    ss_hacceptor.append(hacceptor1)
+    ss_rotatable.append(rotatable1)
+    ss_stereo.append(stereo1)
+    ss_interaction.append(interaction1)
+
+b["MolWeight"] = ss_mw
+b["Tpsa"] = ss_tpsa
+b["LogP"] = ss_logp
+b["HeteroAtoms"] = ss_hetero
+b["HeavyAtoms"] = ss_heavy
+b["NumRings"] = ss_rings
+b["NumAromaticRings"] = ss_aromatic
+b["NumHDonors"] = ss_hdonor
+b["NumHAcceptors"] = ss_hacceptor
+b["NumRotatableBonds"] = ss_rotatable
+b["StereoCenters"] = ss_stereo
+b["Interaction"] = ss_interaction
+
+# ================================
+# 3. Prepare feature matrix X and target vector y for training
+# ================================
+
+x = a.drop(columns=['X', 'smiles'])
+y = a['X']
+X_test = b.drop(columns=['smiles'])
+
+# ================================
+# 4. Why these 4 features?
+# ================================
+# We selected: MolWeight, Tpsa, LogP, Interaction (MW × LogP).
+# They capture orthogonal chemical information and showed strong correlation with target.
+
+features_to_plot = ["MolWeight", "Tpsa", "LogP", "Interaction"]
+for feat in features_to_plot:
+    plt.figure(figsize=(6, 4))
+    plt.scatter(a[feat], y, alpha=0.4, edgecolor='k', s=20)
+    plt.xlabel(feat)
+    plt.ylabel("Target (X)")
+    plt.title(f"Scatter: {feat} vs Target")
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f"scatter_{feat}.png"))
+    plt.show()
+
+corr_subset = a[features_to_plot].corr()
+plt.figure(figsize=(5, 4))
+sns.heatmap(corr_subset, annot=True, cmap="coolwarm", fmt=".2f")
+plt.title("Correlation Between Chosen Descriptors")
+plt.tight_layout()
+plt.savefig(os.path.join(save_dir, "corr_four_features.png"))
+plt.show()
+
+# ================================
+# 5. Cross‑Validation and Model Evaluation on Training Data
+# ================================
+
+cv = KFold(n_splits=5, shuffle=True, random_state=42)
+scoring = {
+    'r2': 'r2',
+    'Mae': 'neg_mean_absolute_error',
+    'Rmse': 'neg_root_mean_squared_error'
+}
+
+# --- 5.1 Linear Regression ---
+pipe_lr = Pipeline([
+    ('scale', StandardScaler()),
+    ('model', LinearRegression())
+])
+scores_lr = cross_validate(pipe_lr, x, y, cv=cv, scoring=scoring)
+print("Cross Validation for Linear Regression")
+print(" R²:", scores_lr['test_r2'])
+print(" MAE:", -scores_lr['test_Mae'])
+print(" RMSE:", -scores_lr['test_Rmse'])
+
+# --- 5.2 Ridge Regression (RidgeCV) ---
+alphas = np.logspace(-6, 6, 12)
+pipe_ridge = Pipeline([
+    ('scale', StandardScaler()),
+    ('model', RidgeCV(alphas=alphas))
+])
+scores_ridge = cross_validate(pipe_ridge, x, y, cv=cv, scoring=scoring)
+print("Cross Validation for Ridge")
+print(" R²:", scores_ridge['test_r2'])
+print(" MAE:", -scores_ridge['test_Mae'])
+print(" RMSE:", -scores_ridge['test_Rmse'])
+
+# --- 5.3 Kernel Ridge (with GridSearch) ---
+kr_param_grid = {
+    'model__alpha': [1e-1, 1e1, 1e2, 1e3],
+    'model__kernel': ['poly', 'rbf'],
+    'model__degree': [2, 3, 4],
+    'model__gamma': [0.1, 0.5, 1, 1.1111111111111112]
+}
+pipe_kr = Pipeline([
+    ('scale', StandardScaler()),
+    ('model', KernelRidge())
+])
+grid_kr = GridSearchCV(pipe_kr, param_grid=kr_param_grid, cv=cv, scoring='neg_mean_absolute_error', n_jobs=-1)
+grid_kr.fit(x, y)
+print("Best parameters for KernelRidge via GridSearch:", grid_kr.best_params_)
+kr_params = {
+    k.replace("model__", ""): v
+    for k, v in grid_kr.best_params_.items()
+    if k.startswith("model__")
+}
+best_kr = grid_kr.best_estimator_
+scores_kr = cross_validate(best_kr, x, y, cv=cv, scoring=scoring)
+print("Cross Validation for Kernel Ridge")
+print(" R²:", scores_kr['test_r2'])
+print(" MAE:", -scores_kr['test_Mae'])
+print(" RMSE:", -scores_kr['test_Rmse'])
+
+# --- 5.4 Lasso Regression (LassoCV) ---
+pipe_lasso = Pipeline([
+    ('scale', StandardScaler()),
+    ('model', LassoCV(alphas=alphas))
+])
+scores_lasso = cross_validate(pipe_lasso, x, y, cv=cv, scoring=scoring)
+print("Cross Validation for Lasso")
+print(" R²:", scores_lasso['test_r2'])
+print(" MAE:", -scores_lasso['test_Mae'])
+print(" RMSE:", -scores_lasso['test_Rmse'])
+
+# --- 5.5 Gradient Boosting Regressor (with GridSearch) ---
+gbr_param_grid = {
+    'model__learning_rate': [0.01, 0.05, 0.1],
+    'model__n_estimators': [500, 1000],
+    'model__min_samples_leaf': [1, 2, 5],
+    'model__min_samples_split': [2, 5, 7],
+    'model__subsample': [0.8, 1.0]
+}
+pipe_gbr = Pipeline([
+    ('scale', StandardScaler()),
+    ('model', GradientBoostingRegressor(random_state=42))
+])
+grid_gbr = GridSearchCV(pipe_gbr, param_grid=gbr_param_grid, cv=cv, scoring='neg_mean_absolute_error', n_jobs=-1)
+grid_gbr.fit(x, y)
+print("Best parameters for GradientBoostingRegressor via GridSearch:", grid_gbr.best_params_)
+
+best_gbr = grid_gbr.best_estimator_
+scores_gbr = cross_validate(best_gbr, x, y, cv=cv, scoring=scoring)
+print("Cross Validation for GradientBoostingRegressor")
+print(" R²:", scores_gbr['test_r2'])
+print(" MAE:", -scores_gbr['test_Mae'])
+print(" RMSE:", -scores_gbr['test_Rmse'])
+
+# --- 5.6 XGBoost Regressor (with GridSearch) ---
+xgb_param_grid = {
+    'model__n_estimators': [500, 1000],
+    'model__learning_rate': [0.01, 0.05, 0.1],
+    'model__reg_lambda': [0, 1, 10],
+    'model__reg_alpha': [0, 1, 8],
+    'model__gamma': [0, 2, 4],
+    'model__subsample': [0.8, 1.0]
+}
+pipe_xgb = Pipeline([
+    ('scale', StandardScaler()),
+    ('model', XGBRegressor(random_state=42, n_jobs=-1))
+])
+grid_xgb = GridSearchCV(pipe_xgb, param_grid=xgb_param_grid, cv=cv, scoring='neg_mean_absolute_error', n_jobs=-1)
+grid_xgb.fit(x, y)
+print("Best parameters for XGBoost via GridSearch:", grid_xgb.best_params_)
+
+best_xgb = grid_xgb.best_estimator_
+scores_xgb = cross_validate(best_xgb, x, y, cv=cv, scoring=scoring)
+print("Cross Validation for XGBoost")
+print(" R²:", scores_xgb['test_r2'])
+print(" MAE:", -scores_xgb['test_Mae'])
+print(" RMSE:", -scores_xgb['test_Rmse'])
+
+# --- 5.7 Random Forest Regressor (with GridSearch) ---
+rf_param_grid = {
+    'model__n_estimators': [500, 1000],
+    'model__max_depth': [None, 10, 20],
+    'model__min_samples_split': [2, 4],
+    'model__min_samples_leaf': [1, 2],
+    'model__max_features': ['auto', 'log2']
+}
+pipe_rf = Pipeline([
+    ('scale', StandardScaler()),
+    ('model', RandomForestRegressor(random_state=42))
+])
+grid_rf = GridSearchCV(pipe_rf, param_grid=rf_param_grid, cv=cv, scoring='neg_mean_absolute_error', n_jobs=-1)
+grid_rf.fit(x, y)
+print("Best parameters for RandomForest via GridSearch:", grid_rf.best_params_)
+
+best_rf = grid_rf.best_estimator_
+scores_rf = cross_validate(best_rf, x, y, cv=cv, scoring=scoring)
+print("Cross Validation for RandomForest")
+print(" R²:", scores_rf['test_r2'])
+print(" MAE:", -scores_rf['test_Mae'])
+print(" RMSE:", -scores_rf['test_Rmse'])
+
+# ================================
+# 6. Model stacking
+# ================================
+
+# Extract parameters without "model__" prefix for XGBoost, RandomForest, GradientBoosting
+
+xgb_params = {
+    k.replace("model__", ""): v
+    for k, v in grid_xgb.best_params_.items()
+    if k.startswith("model__")
+}
+xgb_estimator = XGBRegressor(**xgb_params, random_state=42, n_jobs=-1)
+
+rf_params = {
+    k.replace("model__", ""): v
+    for k, v in grid_rf.best_params_.items()
+    if k.startswith("model__")
+}
+rf_estimator = RandomForestRegressor(**rf_params, random_state=42)
+
+gbr_params = {
+    k.replace("model__", ""): v
+    for k, v in grid_gbr.best_params_.items()
+    if k.startswith("model__")
+}
+gbr_estimator = GradientBoostingRegressor(**gbr_params, random_state=42)
+
+# --- 6.1 Stacking: XGBoost + RandomForest + GradientBoosting (meta-model = GradientBoosting) ---
+estimators = [
+    ('xgb', xgb_estimator),
+    ('rdf', rf_estimator),
+    ('gbr', gbr_estimator)
+]
+meta_model = GradientBoostingRegressor(**gbr_params, random_state=42)
+
+stack = StackingRegressor(
+    estimators=estimators,
+    final_estimator=meta_model,
+    cv=cv,
+    n_jobs=-1
+)
+scores_stack = cross_validate(stack, x, y, cv=cv, scoring=scoring)
+print("Cross Validation for 3‑model stack (XGBoost, RF, GBR)")
+print(" R²:", scores_stack['test_r2'])
+print(" MAE:", -scores_stack['test_Mae'])
+print(" RMSE:", -scores_stack['test_Rmse'])
+
+# --- 6.2 Stacking: KernelRidge + LinearRegression + GradientBoosting (meta-model = GradientBoosting) ---
+
+kr_params = {
+    k.replace("model__", ""): v
+
+
+for k, v in grid_kr.best_params_.items()
+    if k.startswith("model__")
+}
+kr_estimator = Pipeline([
+    ('scale', StandardScaler()),
+    ('model', KernelRidge(**kr_params))
+])
+
+lin_estimator = Pipeline([
+    ('scale', StandardScaler()),
+    ('model', LinearRegression())
+])
+
+estimators_kr = [
+    ('ker', kr_estimator),
+    ('lin', lin_estimator),
+    ('gbr', gbr_estimator)
+]
+meta_kr = GradientBoostingRegressor(**gbr_params, random_state=42)
+
+stack_kr = StackingRegressor(
+    estimators=estimators_kr,
+    final_estimator=meta_kr,
+    cv=cv,
+    n_jobs=-1
+)
+scores_stack_kr = cross_validate(stack_kr, x, y, cv=cv, scoring=scoring)
+print("Cross Validation for 3‑model stack (KernelRidge, Linear, GBR)")
+print(" R²:", scores_stack_kr['test_r2'])
+print(" MAE:", -scores_stack_kr['test_Mae'])
+print(" RMSE:", -scores_stack_kr['test_Rmse'])
+
+# ================================
+# 7. Why use GridSearchCV for hyperparameter tuning?
+# ================================
+# We use GridSearchCV to systematically explore a predefined set of hyperparameter values
+# and select those that minimize the chosen validation metric (MAE). When you see param values
+# like alpha=51.79 or learning_rate=0.01 in the output above, they come directly from this process.
+
+# ================================
+# 8. Final model training and predictions on test set
+# ================================
+# Fit the chosen stacking model (e.g., stack_kr) on all training data
+stack_kr.fit(x, y)
+
+# Predict on the test set
+y_pred = stack_kr.predict(X_test)
+
+# Optionally save predictions to CSV
+# pd.DataFrame({'Id': b.index, 'Predicted': y_pred}).to_csv('predictions.csv', index=False)
